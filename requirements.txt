@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy
+openpyxl
+scikit-learn
+matplotlib
+seaborn
+jupyter
+# image lead / audio lead add their own packages below (e.g. opencv-python, librosa, soundfile, xgboost)
