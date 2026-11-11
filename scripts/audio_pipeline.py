@@ -20,7 +20,12 @@ Design decisions (explained in the notebook and report):
   * Silence at the start and end is trimmed (30 dB below the peak), because people paused
     for very different lengths before speaking (Aime's "yes approve" is 4.0 s raw but 1.25 s
     of speech). Without trimming, the model could learn the length of the pause, not the voice.
-  * TODO (you): one line per augmentation on which real-life situation it imitates.
+  * Every recording gets 5 augmentations, each imitating a way a real login recording can
+    differ from the enrolled one:
+      - pitch_up / pitch_down (1 semitone): a cold, tiredness, or simply a different mood
+      - faster / slower (10%): rushing through the phrase, or saying it carefully
+      - noisy (background noise, 40 dB below the voice): a fan, traffic or people talking nearby
+    Strengths were measured so each stays well below the gap between two different members.
   * Features are measured per 0.5 s window (every 0.25 s), not once per clip. A whole-clip
     average mostly describes WHICH WORDS were said, so with one clip per phrase a model learned
     phrases, not people (cross-validated accuracy 23-35%, chance is 25%). Short windows give the
