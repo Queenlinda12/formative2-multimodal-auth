@@ -18,7 +18,7 @@ Face image ──► Face recognition ──► Product model runs ──► Voi
 | Member | Role | GitHub |
 | --- | --- | --- |
 | Sheja Queen Linda | Data lead: merge, cleaning, EDA, feature engineering | [@Queenlinda12](https://github.com/Queenlinda12) |
-| Member B | Image lead: face images, image features, face recognition model | |
+| Aime Igirimpuhwe | Image lead: face images, image features, face recognition model | [@igaimerca](https://github.com/igaimerca) |
 | Member C | Audio lead: voice samples, audio features, voiceprint model | |
 | Member D | Product model and command-line app | |
 
@@ -62,6 +62,21 @@ jupyter notebook notebooks/01_data_merge_eda.ipynb   # step-by-step walkthrough 
 
 **For the product model:** use `merged_dataset_model_ready.csv`. Drop `transaction_id`, `customer_id` and `product_category`, and use `target_code` as the label (0 Books, 1 Clothing, 2 Electronics, 3 Groceries, 4 Sports).
 
-## Task 2 to 4: Images, audio, models and app
+## Task 2 and the face model: Images (Aime Igirimpuhwe)
 
-To be completed by Members B, C and D.
+```bash
+python scripts/image_pipeline.py    # checks photos, augments them, saves features/image_features.csv
+python scripts/face_model.py        # evaluates and saves models/face_model.joblib
+jupyter notebook notebooks/02_image_processing_face_model.ipynb   # step-by-step walkthrough with plots
+```
+
+- Photos go in `images/raw/` as `name_neutral.jpg`, `name_smiling.jpg`, `name_surprised.jpg`. iPhone `.heic` photos are converted to `.jpg` automatically, upright, and every photo's metadata (including GPS location) is removed before it's committed, since this repo is public.
+- Each photo gets 5 augmentations (rotated, flipped, grayscale, brightened, blurred), saved in `images/augmented/`.
+- Features are 128-number face embeddings from OpenCV's pretrained SFace model, after the YuNet detector finds and aligns the face (`models/pretrained/`).
+- The face model is a Logistic Regression, evaluated so that each photo and its augmented copies are always held out together.
+- `predict_face(image_path)` in `scripts/face_model.py` returns the member's name, or `"unknown"` when the face is not close enough to any member (cosine similarity below 0.363), when there is no face or more than one, or when the file can't be read.
+- `images/raw/unauthorized_face.jpg` (a public-domain NASA portrait, from scikit-image) is the stranger for the demo.
+
+## Task 3 and 4: Audio, product model and app
+
+To be completed by Members C and D.
