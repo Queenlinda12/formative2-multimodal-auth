@@ -99,9 +99,10 @@ def collection_report(folder=PROCESSED):
 
 
 def missing_phrases(report):
-    """{member: [phrases they have not recorded]}"""
-    # TODO 3: look at B's missing_expressions() in image_pipeline.py and do the same with PHRASES
-    return {}
+    """{member: [phrases still missing]} for every member with a gap."""
+    named = report[report["valid_name"].astype(bool)]
+    have = named.groupby("member")["phrase"].apply(set)
+    return {m: [p for p in PHRASES if p not in got] for m, got in have.items() if set(PHRASES) - got}
 
 
 # ---------------------------------------------------------- 3. augment
