@@ -106,7 +106,38 @@ def missing_phrases(report):
 
 
 # ---------------------------------------------------------- 3. augment
-# (next step: pitch_shift, time_stretch, add_noise, AUGMENTATIONS dict)
+# Strengths were picked by measuring how far each one moves a clip's average MFCCs, compared
+# with the gap between two different members (min 27.8). Every setting below stays under ~12,
+# so an augmented clip still "sounds like" its speaker; +/-4 semitones (34) or 30 dB noise (32)
+# would have moved a voice further than the distance to another team member.
+def pitch_shift(y, semitones):
+    return librosa.effects.pitch_shift(y, sr=SAMPLE_RATE, n_steps=semitones)
+
+
+def time_stretch(y, rate):
+    # rate > 1 is faster (shorter), rate < 1 is slower (longer); the pitch stays the same
+    return librosa.effects.time_stretch(y, rate=rate)
+
+
+def add_noise(y, snr_db, seed=0):
+    """White noise at a given signal-to-noise ratio: 40 dB means the voice is 10,000x stronger than the noise."""
+    noise = np.random.default_rng(seed).standard_normal(len(y))
+    noise_power = np.mean(y**2) / 10 ** (snr_db / 10)
+    return (y + noise * np.sqrt(noise_power)).astype(np.float32)
+
+
+AUGMENTATIONS = {
+    "pitch_up": lambda y: pitch_shift(y, 1),
+    "pitch_down": lambda y: pitch_shift(y, -1),
+    "faster": lambda y: time_stretch(y, 1.1),
+    "slower": lambda y: time_stretch(y, 0.9),
+    "noisy": lambda y: add_noise(y, 40),
+}
+
+
+def augment(y):
+    """The original plus every augmentation, as {name: audio}."""
+    return {"original": y, **{name: fn(y) for name, fn in AUGMENTATIONS.items()}}
 
 
 # ------------------------------------------------- 4. extract and save
