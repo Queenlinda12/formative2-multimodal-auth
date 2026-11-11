@@ -1,6 +1,6 @@
 """
 Task 3 - Sound Data Collection and Processing
-Author: Agnes Mbabazi (Audio lead), GitHub @agmbabazi
+Author: Agnes Mbabazi
 
 Converts and checks every member's voice recordings, augments them, and saves the
 features to features/audio_features.csv (one row per 0.5 s window of each clip).
