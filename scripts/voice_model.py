@@ -33,7 +33,6 @@ Design decisions (explained in the notebook and report):
     held-out recordings). Retraining on new recordings re-tunes it, with no manual step.
 """
 
-import shutil
 import subprocess
 import tempfile
 from functools import lru_cache
@@ -48,8 +47,8 @@ from sklearn.model_selection import LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from audio_pipeline import (FEATURES_FILE, NUMERIC_COLUMNS, PROCESSED, ROOT, SAMPLE_RATE, UNAUTHORIZED_PREFIX,
-                            augment, extract_features, load_clip)
+from audio_pipeline import (FEATURES_FILE, NUMERIC_COLUMNS, PROCESSED, ROOT, UNAUTHORIZED_PREFIX,
+                            augment, extract_features, load_clip, to_wav)
 
 MODEL_FILE = ROOT / "models" / "voice_model.joblib"
 UNAUTHORIZED = "unauthorized"
@@ -214,12 +213,9 @@ def read_any(audio_path):
         raise FileNotFoundError(f"No audio at {path}")
     if path.suffix.lower() == ".wav":
         return load_clip(path)
-    if shutil.which("ffmpeg") is None:
-        raise ValueError(f"{path.name} is not a WAV and ffmpeg is not installed to convert it")
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "clip.wav"
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-ac", "1", "-ar", str(SAMPLE_RATE),
-                        str(wav)], check=True)
+        to_wav(path, wav)
         return load_clip(wav)
 
 
@@ -235,7 +231,7 @@ def voice_details(audio_path):
     model = _load()
     try:
         y = read_any(audio_path)
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:  # missing or unreadable: deny, don't crash
+    except (OSError, ValueError, subprocess.CalledProcessError, SystemExit) as exc:  # missing/unreadable: deny
         return {"member": UNAUTHORIZED, "guess": None, "probability": 0.0, "phrase": None,
                 "phrase_probability": 0.0, "reason": str(exc)}
     return decide(model, windows_from_audio(y))

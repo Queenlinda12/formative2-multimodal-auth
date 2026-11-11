@@ -16,6 +16,7 @@ Run from the repository root:
 Design decisions (explained in the notebook and report):
   * Phone recordings (.m4a) are converted once to 16 kHz mono WAV with ffmpeg, so every
     clip has the same format before any processing. The originals in audio/raw/ are never changed.
+    ffmpeg comes with the imageio-ffmpeg pip package, so `pip install -r requirements.txt` is enough.
   * Silence at the start and end is trimmed (30 dB below the peak), because people paused
     for very different lengths before speaking (Aime's "yes approve" is 4.0 s raw but 1.25 s
     of speech). Without trimming, the model could learn the length of the pause, not the voice.
@@ -64,21 +65,33 @@ FEATURE_COLUMNS = ["member", "phrase", "augmentation", "source_clip", "segment",
 
 
 # ------------------------------------------------------------- 1. reading
+def ffmpeg_exe():
+    """The ffmpeg program: a system install if there is one, otherwise the copy bundled with imageio-ffmpeg."""
+    system = shutil.which("ffmpeg")
+    if system:
+        return system
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        raise SystemExit("ffmpeg not found. Run: pip install -r requirements.txt (it installs imageio-ffmpeg)")
+
+
+def to_wav(source, target):
+    """Convert any audio file (e.g. a phone .m4a) to a 16 kHz mono WAV."""
+    subprocess.run([ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(source),
+                    "-ac", "1", "-ar", str(SAMPLE_RATE), str(target)], check=True)
+
+
 def convert_m4a(raw_dir=RAW, out_dir=PROCESSED):
     """Convert every phone recording in raw_dir to a 16 kHz mono WAV in out_dir. Returns the new file names."""
-    if shutil.which("ffmpeg") is None:
-        raise SystemExit("ffmpeg is not installed. Run: sudo apt install ffmpeg")
     out_dir.mkdir(parents=True, exist_ok=True)
     converted = []
     for path in sorted(raw_dir.glob("*.m4a")):
         target = out_dir / f"{path.stem.lower()}.wav"
         if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
             continue  # already converted, and the recording hasn't been replaced since
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-             "-ac", "1", "-ar", str(SAMPLE_RATE), str(target)],
-            check=True,
-        )
+        to_wav(path, target)
         converted.append(target.name)
     return converted
 
