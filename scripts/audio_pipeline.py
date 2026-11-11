@@ -46,6 +46,8 @@ PHRASES = ["yesapprove", "confirmtransaction"]
 NAME_PATTERN = re.compile(r"^([a-z]+)_(yesapprove|confirmtransaction)\.wav$")
 UNAUTHORIZED_PREFIX = "unauthorized"
 REPORT_COLUMNS = ["file", "member", "phrase", "valid_name", "duration_s", "peak", "ok"]
+MIN_SECONDS, MAX_SECONDS = 0.5, 5.0  # speech shorter or longer than this means a bad recording
+CLIP_PEAK = 0.99  # a peak this close to 1.0 means the recording is distorted
 
 
 # ------------------------------------------------------------- 1. reading
@@ -85,15 +87,14 @@ def collection_report(folder=PROCESSED):
     """One row per clip: is it named right, how long is it, how loud is it."""
     rows = []
     for path in team_clips(folder):
-        # TODO 2:
-        #   - match = NAME_PATTERN.match(path.name) -> member = match.group(1), phrase = match.group(2)
-        #     (if there's no match, valid_name is False and member/phrase are None)
-        #   - y = read_audio(path)
-        #   - duration_s = len(y) / SAMPLE_RATE
-        #   - peak = np.abs(y).max()   (1.0 means the recording clipped / distorted)
-        #   - ok = valid name AND 0.5 < duration_s < 5 AND peak < 0.99
-        #   - rows.append([...]) in the same order as REPORT_COLUMNS
-        pass
+        match = NAME_PATTERN.match(path.name)
+        member = match.group(1) if match else None
+        phrase = match.group(2) if match else None
+        y = read_audio(path)
+        duration_s = len(y) / SAMPLE_RATE  # length of the speech after trimming
+        peak = float(np.abs(y).max())  # loudest sample; 1.0 means the mic clipped (distorted)
+        ok = match is not None and MIN_SECONDS < duration_s < MAX_SECONDS and peak < CLIP_PEAK
+        rows.append([path.name, member, phrase, match is not None, round(duration_s, 2), round(peak, 3), ok])
     return pd.DataFrame(rows, columns=REPORT_COLUMNS)
 
 
