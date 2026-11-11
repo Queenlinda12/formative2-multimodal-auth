@@ -71,10 +71,10 @@ def convert_m4a(raw_dir=RAW, out_dir=PROCESSED):
     converted = []
     for path in sorted(raw_dir.glob("*.m4a")):
         target = out_dir / f"{path.stem.lower()}.wav"
-        if target.exists():
-            continue
+        if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
+            continue  # already converted, and the recording hasn't been replaced since
         subprocess.run(
-            ["ffmpeg", "-loglevel", "error", "-i", str(path),
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
              "-ac", "1", "-ar", str(SAMPLE_RATE), str(target)],
             check=True,
         )
