@@ -41,9 +41,12 @@ RECOGNIZER_FILE = PRETRAINED / "face_recognition_sface_2021dec.onnx"
 
 EXPRESSIONS = ["neutral", "smiling", "surprised"]
 NAME_PATTERN = re.compile(r"^([a-z]+)_(neutral|smiling|surprised)\.(?i:jpe?g|png)$")
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 HEIC_SUFFIXES = {".heic", ".heif"}  # iPhone "High Efficiency" photos, converted to JPG first
 UNAUTHORIZED_PREFIX = "unauthorized"
 EMBEDDING_COLUMNS = [f"emb_{i:03d}" for i in range(128)]
+FEATURE_COLUMNS = ["member", "expression", "augmentation", "source_image", *EMBEDDING_COLUMNS]
+REPORT_COLUMNS = ["file", "member", "expression", "valid_name", "duplicate", "faces", "face_score", "ok"]
 MIN_FACE_SCORE = 0.8
 MAX_SIDE = 1280  # phone photos are downscaled first; faces stay large enough to detect
 
@@ -52,90 +55,142 @@ cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)  # hide backend
 
 # ------------------------------------------------------------- 1. reading
 def read_image(path):
-    """Load a photo as a BGR array, downscaled so its longest side is at most MAX_SIDE."""
-    img = cv2.imread(str(path))
+    """Load a photo (JPG, PNG or iPhone HEIC) as a BGR array, longest side at most MAX_SIDE."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"No image at {path}")
+    if path.suffix.lower() in HEIC_SUFFIXES:
+        img = cv2.cvtColor(np.asarray(open_heic(path)), cv2.COLOR_RGB2BGR)
+    else:
+        img = cv2.imread(str(path))
     if img is None:
-        raise ValueError(f"Could not read {path}; is it a JPG or PNG image?")
+        raise ValueError(f"Could not read {path.name} as an image")
     scale = MAX_SIDE / max(img.shape[:2])
     if scale < 1:
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     return img
 
 
+def open_heic(path):
+    """An iPhone .heic photo as an upright RGB Pillow image."""
+    from PIL import Image, ImageOps
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    with Image.open(path) as photo:
+        # exif_transpose applies the phone's rotation tag so the face is upright.
+        return ImageOps.exif_transpose(photo).convert("RGB")
+
+
 class FaceEncoder:
-    """Finds the main face in a photo and turns it into a 128-number embedding."""
+    """Finds the face in a photo and turns it into a 128-number embedding."""
 
     def __init__(self):
         self.detector = cv2.FaceDetectorYN.create(str(DETECTOR_FILE), "", (320, 320), MIN_FACE_SCORE)
         self.recognizer = cv2.FaceRecognizerSF.create(str(RECOGNIZER_FILE), "")
 
-    def detect(self, img):
-        """The most confident face as YuNet's 15-number row (box, landmarks, score), or None."""
+    def detect_all(self, img):
+        """Every face YuNet finds, one row of 15 numbers each (box, 5 landmarks, score)."""
         h, w = img.shape[:2]
         self.detector.setInputSize((w, h))
         _, faces = self.detector.detect(img)
-        if faces is None or len(faces) == 0:
-            return None
-        return faces[np.argmax(faces[:, -1])]
+        return np.empty((0, 15)) if faces is None else faces
+
+    def detect(self, img):
+        """The most confident face, or None (for display)."""
+        faces = self.detect_all(img)
+        return faces[np.argmax(faces[:, -1])] if len(faces) else None
 
     def embed(self, img):
-        """Unit-length embedding of the main face, or None when no face is found."""
-        face = self.detect(img)
-        if face is None:
-            return None
-        aligned = self.recognizer.alignCrop(img, face)
+        """(unit-length embedding, number of faces found).
+
+        The embedding is None unless there is exactly one face, so a second face in the frame
+        (a held-up photo of a member, a bystander) can neither log in nor be enrolled.
+        """
+        faces = self.detect_all(img)
+        if len(faces) != 1:
+            return None, len(faces)
+        aligned = self.recognizer.alignCrop(img, faces[0])
         vector = self.recognizer.feature(aligned).flatten().astype(np.float64)
-        return vector / np.linalg.norm(vector)
+        return vector / np.linalg.norm(vector), 1
 
 
 # --------------------------------------------------- 2. collection check
 def convert_heic(raw_dir=RAW):
-    """Saves a JPG copy of every iPhone .heic photo that doesn't have one yet; returns the new names."""
-    heic = [p for p in sorted(raw_dir.iterdir()) if p.suffix.lower() in HEIC_SUFFIXES]
-    if not heic:
-        return []
-    from PIL import Image, ImageOps
-    from pillow_heif import register_heif_opener
-
-    register_heif_opener()
+    """Saves a JPG copy of each iPhone .heic photo (again if the .heic is newer); returns the new names."""
     converted = []
-    for path in heic:
-        target = path.with_suffix(".jpg")
-        if target.exists():
+    for path in sorted(raw_dir.iterdir()):
+        if path.suffix.lower() not in HEIC_SUFFIXES:
             continue
-        with Image.open(path) as photo:
-            # exif_transpose applies the phone's rotation tag so the face is upright.
-            ImageOps.exif_transpose(photo).convert("RGB").save(target, "JPEG", quality=95)
+        target = path.with_suffix(".jpg")
+        if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
+            continue
+        open_heic(path).save(target, "JPEG", quality=95)
         converted.append(target.name)
     return converted
 
 
+def remove_location_data(raw_dir=RAW):
+    """Re-saves photos that carry EXIF metadata without it; returns the names changed.
+
+    Phones store the GPS location of every photo in its EXIF data, and this repository is
+    public. The rotation tag is applied first, so the saved photo stays upright.
+    """
+    from PIL import Image, ImageOps
+
+    cleaned = []
+    for path in sorted(raw_dir.iterdir()):
+        if path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        with Image.open(path) as photo:
+            if not photo.getexif():
+                continue
+            clean = ImageOps.exif_transpose(photo).convert("RGB")
+        clean.save(path, "PNG" if path.suffix.lower() == ".png" else "JPEG", quality=95)
+        cleaned.append(path.name)
+    return cleaned
+
+
+def team_photos(raw_dir=RAW):
+    """{(member, expression): path} for every correctly named team photo (the first one if a name repeats)."""
+    photos = {}
+    for path in sorted(raw_dir.iterdir()):
+        match = NAME_PATTERN.match(path.name)
+        if match and not path.name.startswith(UNAUTHORIZED_PREFIX):
+            photos.setdefault((match[1], match[2]), path)
+    return photos
+
+
 def collection_report(encoder=None, raw_dir=RAW):
-    """One row per team photo: is the name valid, and is exactly one clear face found?"""
+    """One row per team photo: valid name, not a duplicate, and exactly one face found."""
     encoder = encoder or FaceEncoder()
+    photos = team_photos(raw_dir)
     rows = []
     for path in sorted(raw_dir.iterdir()):
         if path.name.startswith((".", UNAUTHORIZED_PREFIX)) or path.suffix.lower() in HEIC_SUFFIXES:
             continue
         match = NAME_PATTERN.match(path.name)
         try:
-            face = encoder.detect(read_image(path))
-        except ValueError:  # a file OpenCV can't open, so no face can be checked
-            face = None
+            faces = encoder.detect_all(read_image(path))
+        except (OSError, ValueError):  # not an image OpenCV can open
+            faces = np.empty((0, 15))
+        duplicate = bool(match) and photos[(match[1], match[2])] != path
         rows.append({
             "file": path.name,
             "member": match[1] if match else None,
             "expression": match[2] if match else None,
             "valid_name": bool(match),
-            "face_found": face is not None,
-            "face_score": round(float(face[-1]), 3) if face is not None else None,
+            "duplicate": duplicate,
+            "faces": len(faces),
+            "face_score": round(float(faces[:, -1].max()), 3) if len(faces) else None,
+            "ok": bool(match) and not duplicate and len(faces) == 1,
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=REPORT_COLUMNS)
 
 
 def missing_expressions(report):
     """{member: [expressions still missing]} for every member with a gap."""
-    named = report[report["valid_name"]]
+    named = report[report["valid_name"].astype(bool)]
     have = named.groupby("member")["expression"].apply(set)
     return {m: [e for e in EXPRESSIONS if e not in got] for m, got in have.items() if set(EXPRESSIONS) - got}
 
@@ -144,7 +199,8 @@ def missing_expressions(report):
 def rotate(img, angle):
     h, w = img.shape[:2]
     matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
-    return cv2.warpAffine(img, matrix, (w, h), borderMode=cv2.BORDER_REFLECT)
+    # Replicate, not reflect, the edges: a mirrored border could create a second partial face.
+    return cv2.warpAffine(img, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
 
 
 def grayscale(img):
@@ -168,48 +224,57 @@ def augment(img):
 
 # ------------------------------------------------- 4. extract and save
 def build_features(encoder=None, raw_dir=RAW, augmented_dir=AUGMENTED):
-    """Augments every team photo, saves the copies and returns (features, rows where no face was found)."""
+    """Augments every team photo, saves the copies and returns (features, skipped images with the reason)."""
     encoder = encoder or FaceEncoder()
     augmented_dir.mkdir(parents=True, exist_ok=True)
-    rows, no_face = [], []
-    for path in sorted(raw_dir.iterdir()):
-        match = NAME_PATTERN.match(path.name)
-        if not match:
+    rows, skipped = [], []
+    for (member, expression), path in sorted(team_photos(raw_dir).items()):
+        try:
+            versions = augment(read_image(path))
+        except (OSError, ValueError) as exc:
+            skipped.append(f"{path.name}: {exc}")
             continue
-        member, expression = match[1], match[2]
-        for name, img in augment(read_image(path)).items():
+        for name, img in versions.items():
             if name != "original":
                 cv2.imwrite(str(augmented_dir / f"{member}_{expression}_{name}.jpg"), img)
-            embedding = encoder.embed(img)
+            embedding, n_faces = encoder.embed(img)
             if embedding is None:
-                no_face.append(f"{path.name} ({name})")
+                skipped.append(f"{path.name} ({name}): {n_faces} faces found")
                 continue
             rows.append({"member": member, "expression": expression, "augmentation": name,
                          "source_image": path.name, **dict(zip(EMBEDDING_COLUMNS, embedding))})
-    return pd.DataFrame(rows), no_face
+    return pd.DataFrame(rows, columns=FEATURE_COLUMNS), skipped
 
 
 def main():
     converted = convert_heic()
     if converted:
-        print(f"Converted {len(converted)} iPhone photos to JPG: {', '.join(converted)}\n")
+        print(f"Converted {len(converted)} iPhone photos to JPG: {', '.join(converted)}")
+    cleaned = remove_location_data()
+    if cleaned:
+        print(f"Removed location metadata from: {', '.join(cleaned)}")
     encoder = FaceEncoder()
     report = collection_report(encoder)
+    if report.empty:
+        raise SystemExit(f"No team photos in {RAW.relative_to(ROOT)}; expected names like aime_neutral.jpg")
     print(report.to_string(index=False), "\n")
     for problem, files in [("Bad file names", report.loc[~report["valid_name"], "file"]),
-                           ("No face found", report.loc[~report["face_found"], "file"])]:
+                           ("Duplicate photos (only the first is used)", report.loc[report["duplicate"], "file"]),
+                           ("Not exactly one face", report.loc[report["faces"] != 1, "file"])]:
         if len(files):
             print(f"{problem}: {', '.join(files)}")
     for member, missing in missing_expressions(report).items():
         print(f"{member} is missing: {', '.join(missing)}")
 
-    features, no_face = build_features(encoder)
+    features, skipped = build_features(encoder)
+    if features.empty:
+        raise SystemExit("No face could be extracted from any photo, so nothing was saved.")
     FEATURES_FILE.parent.mkdir(parents=True, exist_ok=True)
     features.to_csv(FEATURES_FILE, index=False)
-    print(f"\nSaved {len(features)} rows ({features['source_image'].nunique()} photos x "
+    print(f"\nSaved {len(features)} rows ({features['source_image'].nunique()} photos x up to "
           f"{len(AUGMENTATIONS) + 1} versions) to {FEATURES_FILE.relative_to(ROOT)}")
-    if no_face:
-        print(f"Skipped {len(no_face)} images with no detectable face: {', '.join(no_face)}")
+    if skipped:
+        print(f"Skipped {len(skipped)} images: {'; '.join(skipped)}")
 
 
 if __name__ == "__main__":
