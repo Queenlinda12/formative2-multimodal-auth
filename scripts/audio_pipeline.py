@@ -28,6 +28,7 @@ Design decisions (explained in the notebook and report):
     can keep a clip and its augmented copies on the same side of a train/test split.
 """
 
+import hashlib
 import re
 import shutil
 import subprocess
@@ -50,7 +51,7 @@ PHRASES = ["yesapprove", "confirmtransaction"]
 # name_phrase.wav, or name_phrase_2.wav for extra takes of the same phrase
 NAME_PATTERN = re.compile(r"^([a-z]+)_(yesapprove|confirmtransaction)(?:_(\d+))?\.wav$")
 UNAUTHORIZED_PREFIX = "unauthorized"
-REPORT_COLUMNS = ["file", "member", "phrase", "valid_name", "duration_s", "peak", "ok"]
+REPORT_COLUMNS = ["file", "member", "phrase", "valid_name", "duplicate_of", "duration_s", "peak", "ok"]
 MIN_SECONDS, MAX_SECONDS = 0.5, 5.0  # speech shorter or longer than this means a bad recording
 CLIP_PEAK = 0.99  # a peak this close to 1.0 means the recording is distorted
 TARGET_PEAK = 0.9  # every clip is scaled to this loudest point before augmenting and extracting features
@@ -106,9 +107,26 @@ def team_clips(folder=PROCESSED):
     return [p for p in sorted(folder.glob("*.wav")) if not p.name.startswith(UNAUTHORIZED_PREFIX)]
 
 
+def file_hash(path):
+    """A fingerprint of the file's bytes: two files with the same hash are the same recording, whatever their names."""
+    return hashlib.md5(Path(path).read_bytes()).hexdigest()
+
+
+def unique_clips(folder=PROCESSED):
+    """{clip: the earlier clip it is an exact copy of, or None}. A renamed copy adds no new information
+    and, worse, would let the same recording sit in both training and test data (fake 100% accuracy)."""
+    seen, result = {}, {}
+    for path in team_clips(folder):
+        h = file_hash(path)
+        result[path] = seen.get(h)
+        seen.setdefault(h, path.name)
+    return result
+
+
 def collection_report(folder=PROCESSED):
-    """One row per clip: is it named right, how long is it, how loud is it."""
+    """One row per clip: is it named right, is it a copy, how long is it, how loud is it."""
     rows = []
+    copies = unique_clips(folder)
     for path in team_clips(folder):
         match = NAME_PATTERN.match(path.name)
         member = match.group(1) if match else None
@@ -116,8 +134,10 @@ def collection_report(folder=PROCESSED):
         y = read_audio(path)
         duration_s = len(y) / SAMPLE_RATE  # length of the speech after trimming
         peak = float(np.abs(y).max())  # loudest sample; 1.0 means the mic clipped (distorted)
-        ok = match is not None and MIN_SECONDS < duration_s < MAX_SECONDS and peak < CLIP_PEAK
-        rows.append([path.name, member, phrase, match is not None, round(duration_s, 2), round(peak, 3), ok])
+        ok = (match is not None and copies[path] is None
+              and MIN_SECONDS < duration_s < MAX_SECONDS and peak < CLIP_PEAK)
+        rows.append([path.name, member, phrase, match is not None, copies[path],
+                     round(duration_s, 2), round(peak, 3), ok])
     return pd.DataFrame(rows, columns=REPORT_COLUMNS)
 
 
@@ -198,9 +218,9 @@ def build_features(folder=PROCESSED, augmented_dir=AUGMENTED):
     """Augments every team clip, saves the copies and returns one feature row per window of every version."""
     augmented_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    for path in team_clips(folder):
+    for path, copy_of in unique_clips(folder).items():
         match = NAME_PATTERN.match(path.name)
-        if not match:
+        if not match or copy_of:  # badly named, or an exact copy of a clip already used
             continue
         member, phrase, _take = match.groups()
         for name, y in augment(load_clip(path)).items():
@@ -222,6 +242,9 @@ def main():
     print(report.to_string(index=False), "\n")
     if not report["ok"].all():
         print(f"Check these clips: {', '.join(report.loc[~report['ok'], 'file'])}")
+    copies = report.dropna(subset=["duplicate_of"])
+    for _, row in copies.iterrows():
+        print(f"Skipped {row['file']}: an exact copy of {row['duplicate_of']} (record a new take instead)")
     for member, missing in missing_phrases(report).items():
         print(f"{member} is missing: {', '.join(missing)}")
 
