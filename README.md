@@ -48,8 +48,9 @@ git clone https://github.com/Queenlinda12/formative2-multimodal-auth.git
 cd formative2-multimodal-auth
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-sudo apt install ffmpeg        # converts phone .m4a recordings (macOS: brew install ffmpeg)
 ```
+
+Phone `.m4a` recordings are converted with ffmpeg, which `pip` installs through the `imageio-ffmpeg` package, so no separate install is needed. A system ffmpeg is used instead if one exists.
 
 ### Reproduce everything, in order
 
