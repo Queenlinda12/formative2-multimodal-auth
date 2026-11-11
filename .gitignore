@@ -3,3 +3,9 @@ __pycache__/
 .venv/
 .DS_Store
 *.pyc
+
+# iPhone originals; scripts/image_pipeline.py converts them to .jpg, which is what we commit
+*.heic
+*.HEIC
+*.heif
+*.HEIF
