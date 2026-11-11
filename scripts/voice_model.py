@@ -1,7 +1,7 @@
 """
 Task 4 - Voiceprint Verification Model
 ======================================
-Author: Agnes Mbabazi (Audio lead)
+Author: Agnes Mbabazi (Audio lead), GitHub @agmbabazi
 
 Trains the voice model on features/audio_features.csv, evaluates it, and saves:
 
