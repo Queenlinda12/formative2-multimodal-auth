@@ -25,9 +25,12 @@ Design decisions (explained in the notebook and report):
     the same side (StratifiedGroupKFold grouped by `source_clip`). Testing on a pitch-shifted
     copy of a training clip would overstate accuracy.
   * "unauthorized": a classifier always names one of the members, even for a stranger.
-    So a voice is only accepted if the speaker model is at least SPEAKER_THRESHOLD sure,
+    So a voice is only accepted if the speaker model is sure enough (the speaker threshold),
     AND the phrase model is at least PHRASE_THRESHOLD sure it heard an approved phrase.
-    A leave-one-member-out test checks that strangers are rejected.
+  * The speaker threshold is chosen automatically at the Equal Error Rate: the point where
+    the False Acceptance Rate (strangers let in, measured by leaving each member out of
+    training in turn) equals the False Rejection Rate (members turned away, measured on
+    held-out recordings). Retraining on new recordings re-tunes it, with no manual step.
 """
 
 import shutil
@@ -50,8 +53,9 @@ from audio_pipeline import (FEATURES_FILE, NUMERIC_COLUMNS, PROCESSED, ROOT, SAM
 
 MODEL_FILE = ROOT / "models" / "voice_model.joblib"
 UNAUTHORIZED = "unauthorized"
-SPEAKER_THRESHOLD = 0.5  # TODO after evaluation
-PHRASE_THRESHOLD = 0.5   # TODO after evaluation
+DEFAULT_SPEAKER_THRESHOLD = 0.5  # only used until main() tunes it at the Equal Error Rate
+PHRASE_THRESHOLD = 0.6  # 0.5 would always pass (two phrases); 0.6 asks for a clear answer
+THRESHOLD_GRID = np.round(np.arange(0.30, 0.96, 0.01), 2)
 RANDOM_STATE = 42
 
 
@@ -61,13 +65,13 @@ def make_classifier():
                          LogisticRegression(C=0.1, class_weight="balanced", max_iter=5000, random_state=RANDOM_STATE))
 
 
-def fit(features):
+def fit(features, speaker_threshold=DEFAULT_SPEAKER_THRESHOLD):
     """Trains the speaker model and the phrase model on window rows."""
     X = features[NUMERIC_COLUMNS].to_numpy()
     return {
         "speaker": make_classifier().fit(X, features["member"]),
         "phrase": make_classifier().fit(X, features["phrase"]),
-        "speaker_threshold": SPEAKER_THRESHOLD,
+        "speaker_threshold": speaker_threshold,
         "phrase_threshold": PHRASE_THRESHOLD,
     }
 
@@ -125,8 +129,8 @@ def cross_validate(features, n_splits=2):
             d = decide(model, w[NUMERIC_COLUMNS].to_numpy())
             rows.append({"source_clip": clip, "augmentation": aug, "member": w["member"].iloc[0],
                          "phrase": w["phrase"].iloc[0], "predicted": d["guess"], "probability": d["probability"],
-                         "accepted_as": d["member"], **dict(zip(classes, clip_probabilities(model["speaker"],
-                                                                                            w[NUMERIC_COLUMNS].to_numpy())))})
+                         "phrase_probability": d["phrase_probability"],
+                         **dict(zip(classes, clip_probabilities(model["speaker"], w[NUMERIC_COLUMNS].to_numpy())))})
     return pd.DataFrame(rows), classes
 
 
@@ -135,8 +139,29 @@ def metrics(out, classes):
         "accuracy": accuracy_score(out["member"], out["predicted"]),
         "f1_macro": f1_score(out["member"], out["predicted"], average="macro"),
         "log_loss": log_loss(out["member"], out[list(classes)].to_numpy(), labels=classes),
-        "accepted_correctly": float((out["accepted_as"] == out["member"]).mean()),
     }
+
+
+def genuine_scores(out):
+    """A member's held-out clip only counts as accepted if the RIGHT member was named, so a wrong name scores 0."""
+    return np.where(out["predicted"] == out["member"], out["probability"], 0.0)
+
+
+def error_rates(genuine, impostor, threshold):
+    """(FAR, FRR): share of stranger clips let in, share of member clips turned away."""
+    return float(np.mean(np.asarray(impostor) >= threshold)), float(np.mean(np.asarray(genuine) < threshold))
+
+
+def error_rate_table(genuine, impostor, grid=THRESHOLD_GRID):
+    return pd.DataFrame([(t, *error_rates(genuine, impostor, t)) for t in grid], columns=["threshold", "FAR", "FRR"])
+
+
+def choose_threshold(genuine, impostor, grid=THRESHOLD_GRID):
+    """The Equal Error Rate threshold: where FAR and FRR are closest (ties go to the stricter threshold)."""
+    table = error_rate_table(genuine, impostor, grid)
+    gap = (table["FAR"] - table["FRR"]).abs()
+    best = table[gap == gap.min()].iloc[-1]
+    return float(best["threshold"]), float(best["FAR"]), float(best["FRR"])
 
 
 def phrase_test(features):
@@ -151,17 +176,18 @@ def phrase_test(features):
 
 
 def impostor_test(features):
-    """Leave one member out of training entirely and check their clips come back 'unauthorized'."""
+    """Leave one member out of training entirely: how sure is the model that this 'stranger' is someone it knows?"""
     rows = []
     for member in sorted(features["member"].unique()):
         model = fit(features[features["member"] != member])
         decisions = [decide(model, w[NUMERIC_COLUMNS].to_numpy())
                      for _, w in windows_of(features[features["member"] == member]).items()]
         rows.append({"left_out": member, "clips": len(decisions),
-                     "rejected": sum(d["member"] == UNAUTHORIZED for d in decisions),
                      "highest_probability": round(max(d["probability"] for d in decisions), 3),
-                     "probabilities": [d["probability"] for d in decisions]})
-    return pd.DataFrame(rows, columns=["left_out", "clips", "rejected", "highest_probability", "probabilities"])
+                     "probabilities": [d["probability"] for d in decisions],
+                     "phrase_probabilities": [d["phrase_probability"] for d in decisions]})
+    return pd.DataFrame(rows, columns=["left_out", "clips", "highest_probability", "probabilities",
+                                       "phrase_probabilities"])
 
 
 def unauthorized_test(model, folder=PROCESSED):
@@ -239,13 +265,27 @@ def main():
                        index=classes, columns=classes))
     print(f"\nPhrase model accuracy on unseen speakers: {phrase_test(features):.3f}")
 
-    print("\nLeave-one-member-out (each member treated as a stranger):")
-    print(impostor_test(features).drop(columns="probabilities").to_string(index=False))
+    # --- verification: choose the speaker threshold from FAR / FRR
+    impostors = impostor_test(features)
+    genuine = genuine_scores(out)
+    impostor = np.concatenate(impostors["probabilities"].to_list())
+    threshold, far, frr = choose_threshold(genuine, impostor)
+    print("\nFAR / FRR by speaker threshold (FAR from leaving each member out, FRR from held-out recordings):")
+    table = error_rate_table(genuine, impostor)
+    print(table[table["threshold"].isin(np.round(np.arange(0.4, 0.95, 0.05), 2)) | (table["threshold"] == threshold)]
+          .to_string(index=False, float_format="%.2f"))
+    print(f"Chosen threshold {threshold:.2f} (Equal Error Rate): FAR {far:.2f}, FRR {frr:.2f}")
 
-    model = fit(features)
+    # the full decision, with the phrase check too
+    phrase_ok = out["phrase_probability"].to_numpy() >= PHRASE_THRESHOLD
+    imp_phrase_ok = np.concatenate(impostors["phrase_probabilities"].to_list()) >= PHRASE_THRESHOLD
+    full_far, full_frr = error_rates(np.where(phrase_ok, genuine, 0.0), np.where(imp_phrase_ok, impostor, 0.0), threshold)
+    print(f"With the phrase check (>= {PHRASE_THRESHOLD}): FAR {full_far:.2f}, FRR {full_frr:.2f}")
+
+    model = fit(features, speaker_threshold=threshold)
     MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, MODEL_FILE)
-    print(f"\nSaved {MODEL_FILE.relative_to(ROOT)} (trained on all {len(features)} rows)")
+    print(f"\nSaved {MODEL_FILE.relative_to(ROOT)} (trained on all {len(features)} rows, threshold {threshold:.2f})")
 
     unauthorized = unauthorized_test(model)
     if len(unauthorized):
