@@ -4,11 +4,11 @@ Task 3 - Sound Data Collection and Processing
 Author: Agnes Mbabazi (Audio lead)
 
 Checks every member's voice clips, augments them and saves one feature row per
-clip, original and augmented:
+half-second window of every clip, original and augmented:
 
-    audio/processed/<member>_<phrase>.wav                  16 kHz mono copies of the phone recordings
-    audio/augmented/<member>_<phrase>_<augmentation>.wav
-    features/audio_features.csv   member, phrase, augmentation, source_clip, mfcc_..., rolloff_..., rms_...
+    audio/processed/<member>_<phrase>[_<take>].wav         16 kHz mono copies of the phone recordings
+    audio/augmented/<member>_<phrase>[_<take>]_<augmentation>.wav
+    features/audio_features.csv   member, phrase, augmentation, source_clip, segment, mfcc_..., rolloff_..., rms_...
 
 Run from the repository root:
     python scripts/audio_pipeline.py
@@ -20,6 +20,10 @@ Design decisions (explained in the notebook and report):
     for very different lengths before speaking (Aime's "yes approve" is 4.0 s raw but 1.25 s
     of speech). Without trimming, the model could learn the length of the pause, not the voice.
   * TODO (you): one line per augmentation on which real-life situation it imitates.
+  * Features are measured per 0.5 s window (every 0.25 s), not once per clip. A whole-clip
+    average mostly describes WHICH WORDS were said, so with one clip per phrase a model learned
+    phrases, not people (cross-validated accuracy 23-35%, chance is 25%). Short windows give the
+    model many small pieces of each voice; a clip's decision is the average over its windows.
   * `source_clip` records which original recording a row came from, so the voice model
     can keep a clip and its augmented copies on the same side of a train/test split.
 """
@@ -43,17 +47,19 @@ FEATURES_FILE = ROOT / "features" / "audio_features.csv"
 SAMPLE_RATE = 16_000  # 16 kHz is plenty for speech and is what most voice models use
 TRIM_DB = 30  # quieter than (loudest point - 30 dB) counts as silence; 10 cut into words, 60 kept the dead air
 PHRASES = ["yesapprove", "confirmtransaction"]
-NAME_PATTERN = re.compile(r"^([a-z]+)_(yesapprove|confirmtransaction)\.wav$")
+# name_phrase.wav, or name_phrase_2.wav for extra takes of the same phrase
+NAME_PATTERN = re.compile(r"^([a-z]+)_(yesapprove|confirmtransaction)(?:_(\d+))?\.wav$")
 UNAUTHORIZED_PREFIX = "unauthorized"
 REPORT_COLUMNS = ["file", "member", "phrase", "valid_name", "duration_s", "peak", "ok"]
 MIN_SECONDS, MAX_SECONDS = 0.5, 5.0  # speech shorter or longer than this means a bad recording
 CLIP_PEAK = 0.99  # a peak this close to 1.0 means the recording is distorted
 TARGET_PEAK = 0.9  # every clip is scaled to this loudest point before augmenting and extracting features
-N_MFCC = 13
+N_MFCC = 13  # coefficients 1-13; coefficient 0 is overall loudness, which rms already measures
+SEGMENT_SECONDS, SEGMENT_HOP = 0.5, 0.25  # window length and step for the feature rows
 SUMMARY_FEATURES = ["rolloff", "centroid", "zcr", "rms"]
 FEATURE_NAMES = [f"mfcc_{i:02d}" for i in range(1, N_MFCC + 1)] + SUMMARY_FEATURES
 NUMERIC_COLUMNS = [f"{name}_{stat}" for name in FEATURE_NAMES for stat in ("mean", "std")]
-FEATURE_COLUMNS = ["member", "phrase", "augmentation", "source_clip", *NUMERIC_COLUMNS]
+FEATURE_COLUMNS = ["member", "phrase", "augmentation", "source_clip", "segment", *NUMERIC_COLUMNS]
 
 
 # ------------------------------------------------------------- 1. reading
@@ -165,7 +171,7 @@ def frame_features(y):
     and measures each frame separately.
     """
     return np.vstack([
-        librosa.feature.mfcc(y=y, sr=SAMPLE_RATE, n_mfcc=N_MFCC),           # shape of the voice (vocal tract)
+        librosa.feature.mfcc(y=y, sr=SAMPLE_RATE, n_mfcc=N_MFCC + 1)[1:],   # shape of the voice (vocal tract)
         librosa.feature.spectral_rolloff(y=y, sr=SAMPLE_RATE, roll_percent=0.85),  # Hz below which 85% of energy sits
         librosa.feature.spectral_centroid(y=y, sr=SAMPLE_RATE),             # "centre of mass" of the spectrum: brightness
         librosa.feature.zero_crossing_rate(y),                              # how often the wave crosses 0: noisiness
@@ -173,27 +179,36 @@ def frame_features(y):
     ])
 
 
-def extract_features(y):
-    """One fixed-length row per clip: the mean and standard deviation of every per-frame feature over time."""
-    frames = frame_features(y)
-    stats = np.column_stack([frames.mean(axis=1), frames.std(axis=1)]).ravel()  # mfcc_01_mean, mfcc_01_std, ...
+def summarize(frames):
+    """Mean and standard deviation over time of every per-frame feature: mfcc_01_mean, mfcc_01_std, ..."""
+    stats = np.column_stack([frames.mean(axis=1), frames.std(axis=1)]).ravel()
     return dict(zip(NUMERIC_COLUMNS, stats.astype(float)))
 
 
+def extract_features(y):
+    """One feature row per 0.5 s window of the clip (a clip shorter than one window gives one row)."""
+    frames = frame_features(y)
+    hop = SAMPLE_RATE * 0.032  # librosa's default step between frames is 512 samples = 32 ms
+    width, step = round(SEGMENT_SECONDS * SAMPLE_RATE / hop), round(SEGMENT_HOP * SAMPLE_RATE / hop)
+    starts = range(0, max(1, frames.shape[1] - width + 1), step)
+    return [summarize(frames[:, s:s + width]) for s in starts]
+
+
 def build_features(folder=PROCESSED, augmented_dir=AUGMENTED):
-    """Augments every team clip, saves the copies and returns one feature row per version."""
+    """Augments every team clip, saves the copies and returns one feature row per window of every version."""
     augmented_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for path in team_clips(folder):
         match = NAME_PATTERN.match(path.name)
         if not match:
             continue
-        member, phrase = match.groups()
+        member, phrase, _take = match.groups()
         for name, y in augment(load_clip(path)).items():
             if name != "original":
-                sf.write(augmented_dir / f"{member}_{phrase}_{name}.wav", y, SAMPLE_RATE)
-            rows.append({"member": member, "phrase": phrase, "augmentation": name,
-                         "source_clip": path.name, **extract_features(y)})
+                sf.write(augmented_dir / f"{path.stem}_{name}.wav", y, SAMPLE_RATE)
+            for i, values in enumerate(extract_features(y)):
+                rows.append({"member": member, "phrase": phrase, "augmentation": name,
+                             "source_clip": path.name, "segment": i, **values})
     return pd.DataFrame(rows, columns=FEATURE_COLUMNS)
 
 
@@ -214,7 +229,8 @@ def main():
     FEATURES_FILE.parent.mkdir(parents=True, exist_ok=True)
     features.to_csv(FEATURES_FILE, index=False)
     print(f"Saved {len(features)} rows ({features['source_clip'].nunique()} clips x {len(AUGMENTATIONS) + 1} "
-          f"versions, {len(NUMERIC_COLUMNS)} features each) to {FEATURES_FILE.relative_to(ROOT)}")
+          f"versions x about {len(features) // len(features.groupby(['source_clip', 'augmentation']))} windows, "
+          f"{len(NUMERIC_COLUMNS)} features each) to {FEATURES_FILE.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
