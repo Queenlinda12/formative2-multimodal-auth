@@ -6,3 +6,6 @@ matplotlib
 seaborn
 jupyter
 # image lead / audio lead add their own packages below (e.g. opencv-python, librosa, soundfile, xgboost)
+opencv-python>=4.8   # image lead: face detection (YuNet) and embeddings (SFace)
+pillow-heif          # image lead: converts iPhone .heic photos to .jpg
+joblib
