@@ -19,7 +19,7 @@ Face image ──► Face recognition ──► Product model runs ──► Voi
 | --- | --- | --- |
 | Sheja Queen Linda | Data lead: merge, cleaning, EDA, feature engineering | [@Queenlinda12](https://github.com/Queenlinda12) |
 | Aime Igirimpuhwe | Image lead: face images, image features, face recognition model | [@igaimerca](https://github.com/igaimerca) |
-| Agnes Mbabazi | Audio lead: voice samples, audio features, voiceprint model | |
+| Agnes Mbabazi | Audio lead: voice samples, audio features, voiceprint model | [@agmbabazi](https://github.com/agmbabazi) |
 | Member D | Product model and command-line app | |
 
 ## Folder layout
