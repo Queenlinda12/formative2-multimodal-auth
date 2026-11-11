@@ -48,6 +48,12 @@ UNAUTHORIZED_PREFIX = "unauthorized"
 REPORT_COLUMNS = ["file", "member", "phrase", "valid_name", "duration_s", "peak", "ok"]
 MIN_SECONDS, MAX_SECONDS = 0.5, 5.0  # speech shorter or longer than this means a bad recording
 CLIP_PEAK = 0.99  # a peak this close to 1.0 means the recording is distorted
+TARGET_PEAK = 0.9  # every clip is scaled to this loudest point before augmenting and extracting features
+N_MFCC = 13
+SUMMARY_FEATURES = ["rolloff", "centroid", "zcr", "rms"]
+FEATURE_NAMES = [f"mfcc_{i:02d}" for i in range(1, N_MFCC + 1)] + SUMMARY_FEATURES
+NUMERIC_COLUMNS = [f"{name}_{stat}" for name in FEATURE_NAMES for stat in ("mean", "std")]
+FEATURE_COLUMNS = ["member", "phrase", "augmentation", "source_clip", *NUMERIC_COLUMNS]
 
 
 # ------------------------------------------------------------- 1. reading
@@ -75,6 +81,17 @@ def read_audio(path):
     y, _ = librosa.load(path, sr=SAMPLE_RATE, mono=True)
     trimmed, _ = librosa.effects.trim(y, top_db=TRIM_DB)
     return trimmed
+
+
+def normalize(y):
+    """Scale a clip so its loudest point is TARGET_PEAK. Peaks ranged 0.16-0.87, mostly from phone distance."""
+    peak = np.abs(y).max()
+    return y if peak == 0 else (y * (TARGET_PEAK / peak)).astype(np.float32)
+
+
+def load_clip(path):
+    """What every later step uses: the trimmed clip at a standard volume."""
+    return normalize(read_audio(path))
 
 
 # --------------------------------------------------- 2. collection check
@@ -141,7 +158,43 @@ def augment(y):
 
 
 # ------------------------------------------------- 4. extract and save
-# (step after that: extract_features, build_features)
+def frame_features(y):
+    """Per-frame features, shape (17, n_frames): 13 MFCCs, roll-off, centroid, zero-crossing rate, energy.
+
+    librosa cuts the clip into short overlapping frames (2048 samples = 128 ms, every 32 ms)
+    and measures each frame separately.
+    """
+    return np.vstack([
+        librosa.feature.mfcc(y=y, sr=SAMPLE_RATE, n_mfcc=N_MFCC),           # shape of the voice (vocal tract)
+        librosa.feature.spectral_rolloff(y=y, sr=SAMPLE_RATE, roll_percent=0.85),  # Hz below which 85% of energy sits
+        librosa.feature.spectral_centroid(y=y, sr=SAMPLE_RATE),             # "centre of mass" of the spectrum: brightness
+        librosa.feature.zero_crossing_rate(y),                              # how often the wave crosses 0: noisiness
+        librosa.feature.rms(y=y),                                           # energy (loudness) of each frame
+    ])
+
+
+def extract_features(y):
+    """One fixed-length row per clip: the mean and standard deviation of every per-frame feature over time."""
+    frames = frame_features(y)
+    stats = np.column_stack([frames.mean(axis=1), frames.std(axis=1)]).ravel()  # mfcc_01_mean, mfcc_01_std, ...
+    return dict(zip(NUMERIC_COLUMNS, stats.astype(float)))
+
+
+def build_features(folder=PROCESSED, augmented_dir=AUGMENTED):
+    """Augments every team clip, saves the copies and returns one feature row per version."""
+    augmented_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for path in team_clips(folder):
+        match = NAME_PATTERN.match(path.name)
+        if not match:
+            continue
+        member, phrase = match.groups()
+        for name, y in augment(load_clip(path)).items():
+            if name != "original":
+                sf.write(augmented_dir / f"{member}_{phrase}_{name}.wav", y, SAMPLE_RATE)
+            rows.append({"member": member, "phrase": phrase, "augmentation": name,
+                         "source_clip": path.name, **extract_features(y)})
+    return pd.DataFrame(rows, columns=FEATURE_COLUMNS)
 
 
 def main():
@@ -152,8 +205,16 @@ def main():
     if report.empty:
         raise SystemExit(f"No team clips in {PROCESSED.relative_to(ROOT)}")
     print(report.to_string(index=False), "\n")
+    if not report["ok"].all():
+        print(f"Check these clips: {', '.join(report.loc[~report['ok'], 'file'])}")
     for member, missing in missing_phrases(report).items():
         print(f"{member} is missing: {', '.join(missing)}")
+
+    features = build_features()
+    FEATURES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    features.to_csv(FEATURES_FILE, index=False)
+    print(f"Saved {len(features)} rows ({features['source_clip'].nunique()} clips x {len(AUGMENTATIONS) + 1} "
+          f"versions, {len(NUMERIC_COLUMNS)} features each) to {FEATURES_FILE.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
