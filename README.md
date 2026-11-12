@@ -35,7 +35,8 @@ audio/augmented/   augmented voice clips
 features/          image_features.csv, audio_features.csv
 scripts/           merge_pipeline.py (+ face, voice, product model scripts and main.py)
 notebooks/         01_data_merge_eda.ipynb, 02_image_processing_face_model.ipynb,
-                   03_audio_processing_voice_model.ipynb (+ the final combined notebook)
+                   03_audio_processing_voice_model.ipynb,
+                   04_full_system.ipynb (the whole system end to end)
 models/            saved model files
 figures/           plots used in the report
 report/            final PDF report
@@ -62,6 +63,7 @@ python scripts/audio_pipeline.py      # Task 3: audio features
 python scripts/voice_model.py         #         voice model
 python scripts/product_model.py       # Task 4: product model
 python scripts/main.py --demo         # Task 6: full transaction and denied attempts
+jupyter notebook notebooks/04_full_system.ipynb   # all of the above in one notebook, with results
 ```
 
 Every output (`data/processed/`, `features/`, `models/`, `audio/processed/`, augmented images and clips) is rebuilt from the raw files by these scripts, so deleting an output and re-running brings it back.
