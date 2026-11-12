@@ -23,9 +23,10 @@ Design decisions (explained in the notebook and report):
     `source_image`). Testing on a rotated copy of a training photo would overstate accuracy.
   * "unknown": a classifier always names one of the members, even for a stranger.
     So a face is only accepted when it is also close to that member's reference face
-    (the average of their original photos): cosine similarity of at least 0.363, the
-    threshold SFace's authors publish for "same person". One comparison per member keeps
-    that threshold as calibrated. A leave-one-member-out test checks that strangers are rejected.
+    (the average of their original photos): cosine similarity of at least 0.5. SFace's
+    authors publish 0.363 for "same person", but this check guards payments, so it is
+    stricter: on our photos members score 0.73 or more and strangers stay below 0.35.
+    A leave-one-member-out test checks that strangers are rejected.
   * An image must contain exactly one face, so a member's photo held up next to a
     stranger's face can't be used to log in.
 """
@@ -45,7 +46,7 @@ from image_pipeline import (EMBEDDING_COLUMNS, FEATURES_FILE, RAW, ROOT, FaceEnc
 
 MODEL_FILE = ROOT / "models" / "face_model.joblib"
 UNKNOWN = "unknown"
-SIMILARITY_THRESHOLD = 0.363  # SFace's published cosine threshold for "same person"
+SIMILARITY_THRESHOLD = 0.5  # stricter than SFace's published 0.363, since this guards payments
 RANDOM_STATE = 42
 
 
