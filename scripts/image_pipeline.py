@@ -24,6 +24,7 @@ Design decisions (explained in the notebook and report):
     can keep a photo and its augmented copies on the same side of a train/test split.
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -40,7 +41,7 @@ DETECTOR_FILE = PRETRAINED / "face_detection_yunet_2023mar.onnx"
 RECOGNIZER_FILE = PRETRAINED / "face_recognition_sface_2021dec.onnx"
 
 EXPRESSIONS = ["neutral", "smiling", "surprised"]
-NAME_PATTERN = re.compile(r"^([a-z]+)_(neutral|smiling|surprised)\.(?i:jpe?g|png)$")
+NAME_PATTERN = re.compile(r"([a-z]+)_(neutral|smiling|surprised)\.(?i:jpe?g|png)")  # used with fullmatch
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 HEIC_SUFFIXES = {".heic", ".heif"}  # iPhone "High Efficiency" photos, converted to JPG first
 UNAUTHORIZED_PREFIX = "unauthorized"
@@ -49,6 +50,9 @@ FEATURE_COLUMNS = ["member", "expression", "augmentation", "source_image", *EMBE
 REPORT_COLUMNS = ["file", "member", "expression", "valid_name", "duplicate", "faces", "face_score", "ok"]
 MIN_FACE_SCORE = 0.8
 MAX_SIDE = 1280  # phone photos are downscaled first; faces stay large enough to detect
+# YuNet can misplace a face that fills most of the frame (a close-up selfie got its box half a face too
+# low, with a lower score), so faces are also looked for at half size; the most confident box is used.
+DETECT_SCALES = (1.0, 0.5)
 
 cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)  # hide backend warnings, keep real errors
 
@@ -72,14 +76,39 @@ def read_image(path):
 
 
 def open_heic(path):
-    """An iPhone .heic photo as an upright RGB Pillow image."""
-    from PIL import Image, ImageOps
+    """An iPhone .heic photo as an upright RGB Pillow image, without metadata."""
+    from PIL import Image
     from pillow_heif import register_heif_opener
 
     register_heif_opener()
     with Image.open(path) as photo:
-        # exif_transpose applies the phone's rotation tag so the face is upright.
-        return ImageOps.exif_transpose(photo).convert("RGB")
+        return without_metadata(photo)
+
+
+def without_metadata(photo):
+    """Upright RGB copy of a Pillow image with EXIF and XMP (where phones keep GPS) dropped; colour profile kept."""
+    from PIL import ImageOps
+
+    icc = photo.info.get("icc_profile") if photo.mode == "RGB" else None  # a CMYK/grey profile won't fit RGB
+    clean = ImageOps.exif_transpose(photo).convert("RGB")
+    # Pillow writes info["xmp"] back out when saving, so the copy's info is replaced, not just the EXIF.
+    clean.info = {"icc_profile": icc} if icc else {}
+    return clean
+
+
+def has_metadata(photo):
+    return bool(photo.getexif()) or any(key in photo.info for key in ("xmp", "XML:com.adobe.xmp"))
+
+
+def same_face(a, b):
+    """True when two boxes mostly overlap (by the smaller box's area): one face seen by two passes,
+    even when one pass placed its box half a face off."""
+    (ax, ay, aw, ah), (bx, by, bw, bh) = a[:4], b[:4]
+    overlap_w = min(ax + aw, bx + bw) - max(ax, bx)
+    overlap_h = min(ay + ah, by + bh) - max(ay, by)
+    if overlap_w <= 0 or overlap_h <= 0:
+        return False
+    return bool(overlap_w * overlap_h >= 0.5 * min(aw * ah, bw * bh))
 
 
 class FaceEncoder:
@@ -90,11 +119,27 @@ class FaceEncoder:
         self.recognizer = cv2.FaceRecognizerSF.create(str(RECOGNIZER_FILE), "")
 
     def detect_all(self, img):
-        """Every face YuNet finds, one row of 15 numbers each (box, 5 landmarks, score)."""
-        h, w = img.shape[:2]
-        self.detector.setInputSize((w, h))
-        _, faces = self.detector.detect(img)
-        return np.empty((0, 15)) if faces is None else faces
+        """Every distinct face found at any of DETECT_SCALES, most confident first.
+
+        One row of 15 numbers per face (box, 5 landmarks, score) in img's pixels. Detections from
+        all passes are merged, so a second face that only one pass sees still blocks a login.
+        """
+        found = []
+        for scale in DETECT_SCALES:
+            h, w = (int(round(n * scale)) for n in img.shape[:2])
+            if min(h, w) < 1:
+                continue
+            small = img if scale == 1 else cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+            self.detector.setInputSize((w, h))
+            _, faces = self.detector.detect(small)
+            if faces is not None:
+                faces[:, :14] /= scale
+                found.extend(faces)
+        distinct = []
+        for face in sorted(found, key=lambda f: -f[-1]):
+            if not any(same_face(face, kept) for kept in distinct):
+                distinct.append(face)
+        return np.array(distinct).reshape(-1, 15)
 
     def detect(self, img):
         """The most confident face, or None (for display)."""
@@ -125,39 +170,67 @@ def convert_heic(raw_dir=RAW):
         target = path.with_suffix(".jpg")
         if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
             continue
-        open_heic(path).save(target, "JPEG", quality=95)
+        photo = open_heic(path)
+        photo.save(target, "JPEG", quality=95, icc_profile=photo.info.get("icc_profile"))
         converted.append(target.name)
     return converted
 
 
 def remove_location_data(raw_dir=RAW):
-    """Re-saves photos that carry EXIF metadata without it; returns the names changed.
+    """Re-saves photos that carry EXIF or XMP metadata without it; returns the names changed.
 
-    Phones store the GPS location of every photo in its EXIF data, and this repository is
+    Phones store the GPS location of every photo in that metadata, and this repository is
     public. The rotation tag is applied first, so the saved photo stays upright.
     """
-    from PIL import Image, ImageOps
+    from PIL import Image
 
     cleaned = []
     for path in sorted(raw_dir.iterdir()):
         if path.suffix.lower() not in IMAGE_SUFFIXES:
             continue
-        with Image.open(path) as photo:
-            if not photo.getexif():
-                continue
-            clean = ImageOps.exif_transpose(photo).convert("RGB")
-        clean.save(path, "PNG" if path.suffix.lower() == ".png" else "JPEG", quality=95)
+        try:
+            with Image.open(path) as photo:
+                if not has_metadata(photo):
+                    continue
+                clean = without_metadata(photo)
+        except OSError:  # not an image: collection_report lists it as a bad photo
+            continue
+        clean.save(path, "PNG" if path.suffix.lower() == ".png" else "JPEG", quality=95,
+                   icc_profile=clean.info.get("icc_profile"))
         cleaned.append(path.name)
     return cleaned
 
 
+def parse_name(name):
+    """(member, expression) for a name like aime_neutral.jpg (lowercase, as the audio files are), else None."""
+    match = NAME_PATTERN.fullmatch(name)
+    return (match[1], match[2]) if match else None
+
+
+def unauthorized_photos(raw_dir=RAW):
+    """The stranger photos for the rejection demo (.heic originals are converted to .jpg first)."""
+    return [p for p in sorted(raw_dir.iterdir())
+            if p.name.startswith(UNAUTHORIZED_PREFIX) and p.suffix.lower() in IMAGE_SUFFIXES]
+
+
 def team_photos(raw_dir=RAW):
-    """{(member, expression): path} for every correctly named team photo (the first one if a name repeats)."""
-    photos = {}
+    """{(member, expression): path} for every correctly named team photo.
+
+    The first file wins when a name repeats, and a file with the same bytes as an earlier one is
+    skipped, so one selfie saved as two expressions can't sit on both sides of a train/test split.
+    """
+    photos, seen = {}, set()
     for path in sorted(raw_dir.iterdir()):
-        match = NAME_PATTERN.match(path.name)
-        if match and not path.name.startswith(UNAUTHORIZED_PREFIX):
-            photos.setdefault((match[1], match[2]), path)
+        key = parse_name(path.name)
+        if not key or path.name.startswith(UNAUTHORIZED_PREFIX) or key in photos:
+            continue
+        try:
+            digest = hashlib.md5(path.read_bytes()).hexdigest()
+        except OSError:  # unreadable: kept, so collection_report shows it with no face
+            digest = path
+        if digest not in seen:
+            seen.add(digest)
+            photos[key] = path
     return photos
 
 
@@ -169,29 +242,30 @@ def collection_report(encoder=None, raw_dir=RAW):
     for path in sorted(raw_dir.iterdir()):
         if path.name.startswith((".", UNAUTHORIZED_PREFIX)) or path.suffix.lower() in HEIC_SUFFIXES:
             continue
-        match = NAME_PATTERN.match(path.name)
+        key = parse_name(path.name)
         try:
             faces = encoder.detect_all(read_image(path))
         except (OSError, ValueError):  # not an image OpenCV can open
             faces = np.empty((0, 15))
-        duplicate = bool(match) and photos[(match[1], match[2])] != path
+        duplicate = bool(key) and photos.get(key) != path
         rows.append({
             "file": path.name,
-            "member": match[1] if match else None,
-            "expression": match[2] if match else None,
-            "valid_name": bool(match),
+            "member": key[0] if key else None,
+            "expression": key[1] if key else None,
+            "valid_name": bool(key),
             "duplicate": duplicate,
             "faces": len(faces),
             "face_score": round(float(faces[:, -1].max()), 3) if len(faces) else None,
-            "ok": bool(match) and not duplicate and len(faces) == 1,
+            "ok": bool(key) and not duplicate and len(faces) == 1,
         })
     return pd.DataFrame(rows, columns=REPORT_COLUMNS)
 
 
 def missing_expressions(report):
-    """{member: [expressions still missing]} for every member with a gap."""
+    """{member: [expressions still missing]} for every member with a gap (a duplicate photo doesn't count)."""
     named = report[report["valid_name"].astype(bool)]
-    have = named.groupby("member")["expression"].apply(set)
+    usable = named[~named["duplicate"].astype(bool)]
+    have = {m: set(usable.loc[usable["member"] == m, "expression"]) for m in named["member"].unique()}
     return {m: [e for e in EXPRESSIONS if e not in got] for m, got in have.items() if set(EXPRESSIONS) - got}
 
 
