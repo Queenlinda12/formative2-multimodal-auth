@@ -40,8 +40,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, log_loss
 from sklearn.model_selection import StratifiedGroupKFold
 
-from image_pipeline import (EMBEDDING_COLUMNS, FEATURES_FILE, IMAGE_SUFFIXES, RAW, ROOT, UNAUTHORIZED_PREFIX,
-                            FaceEncoder, augment, read_image)
+from image_pipeline import (EMBEDDING_COLUMNS, FEATURES_FILE, RAW, ROOT, FaceEncoder, augment, read_image,
+                            unauthorized_photos)
 
 MODEL_FILE = ROOT / "models" / "face_model.joblib"
 UNKNOWN = "unknown"
@@ -164,9 +164,7 @@ def unauthorized_test(model, encoder=None, raw_dir=RAW):
     """Every unauthorized_* photo and its augmentations, through the given model."""
     encoder = encoder or FaceEncoder()
     rows = []
-    for path in sorted(raw_dir.glob(f"{UNAUTHORIZED_PREFIX}*")):
-        if path.suffix.lower() not in IMAGE_SUFFIXES:  # .heic originals are converted to .jpg first
-            continue
+    for path in unauthorized_photos(raw_dir):
         for name, img in augment(read_image(path)).items():
             d = decide(model, *encoder.embed(img))
             rows.append({"image": path.name, "augmentation": name, "result": d["member"],

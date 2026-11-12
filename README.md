@@ -85,9 +85,10 @@ jupyter notebook notebooks/01_data_merge_eda.ipynb   # step-by-step walkthrough 
 python scripts/image_pipeline.py    # checks photos, augments them, saves features/image_features.csv
 python scripts/face_model.py        # evaluates and saves models/face_model.joblib
 jupyter notebook notebooks/02_image_processing_face_model.ipynb   # step-by-step walkthrough with plots
+python -m pytest tests               # edge cases: names, duplicates, location data, close-ups, unknown faces
 ```
 
-- Photos go in `images/raw/` as `name_neutral.jpg`, `name_smiling.jpg`, `name_surprised.jpg`. iPhone `.heic` photos are converted to `.jpg` automatically, upright, and every photo's metadata (including GPS location) is removed before it's committed, since this repo is public.
+- Photos go in `images/raw/` as `name_neutral.jpg`, `name_smiling.jpg`, `name_surprised.jpg`, in lowercase like the audio files. iPhone `.heic` photos are converted to `.jpg` automatically, upright. Run `python scripts/image_pipeline.py` before committing new photos: it removes their metadata, including the GPS location phones store, since this repo is public.
 - Each photo gets 5 augmentations (rotated, flipped, grayscale, brightened, blurred), saved in `images/augmented/`.
 - Features are 128-number face embeddings from OpenCV's pretrained SFace model, after the YuNet detector finds and aligns the face (`models/pretrained/`).
 - The face model is a Logistic Regression, evaluated so that each photo and its augmented copies are always held out together.
