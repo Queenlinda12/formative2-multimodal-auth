@@ -96,7 +96,7 @@ python -m pytest tests               # edge cases: names, duplicates, location d
 - Each photo gets 5 augmentations (rotated, flipped, grayscale, brightened, blurred), saved in `images/augmented/`.
 - Features are 128-number face embeddings from OpenCV's pretrained SFace model, after the YuNet detector finds and aligns the face (`models/pretrained/`).
 - The face model is a Logistic Regression, evaluated so that each photo and its augmented copies are always held out together.
-- `predict_face(image_path)` in `scripts/face_model.py` returns the member's name, or `"unknown"` when the face is not close enough to any member (cosine similarity below 0.363), when there is no face or more than one, or when the file can't be read.
+- `predict_face(image_path)` in `scripts/face_model.py` returns the member's name, or `"unknown"` when the face is not close enough to any member (cosine similarity below 0.5), when there is no face or more than one, or when the file can't be read.
 - `images/raw/unauthorized_face.jpg` (a public-domain NASA portrait, from scikit-image) is the stranger for the demo.
 
 ## Task 3 and the voice model: Audio (Agnes Mbabazi)

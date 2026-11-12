@@ -213,3 +213,13 @@ def test_predict_face_denies_bad_files(tmp_path):
     (tmp_path / "notes.jpg").write_text("not a photo")
     assert fm.predict_face(tmp_path / "missing.jpg") == fm.UNKNOWN
     assert fm.predict_face(tmp_path / "notes.jpg") == fm.UNKNOWN
+
+
+def test_threshold_separates_members_from_strangers():
+    """On held-out photos every member is accepted, and every member left out of training is rejected."""
+    features = pd.read_csv(ip.FEATURES_FILE)
+    out, probabilities, classes = fm.evaluate(features)
+    assert fm.metrics(out, probabilities, classes)["accepted_correctly"] == 1.0
+    strangers = fm.impostor_test(features)
+    assert (strangers["rejected"] == strangers["images"]).all()
+    assert strangers["highest_similarity"].max() < fm.SIMILARITY_THRESHOLD <= out["genuine_similarity"].min()
