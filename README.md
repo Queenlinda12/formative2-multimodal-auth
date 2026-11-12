@@ -9,7 +9,7 @@ Face image ──► Face recognition ──► Product model runs ──► Voi
               Access denied                                               Access denied
 ```
 
-> Status: data, image and audio parts are complete. The product model and command-line app (Task 4, Member D) are in progress. See `TEAM_GUIDE.md` for who does what.
+> Status: data merge, image and audio pipelines, and all three models (face, voice, product) are in the repository. `scripts/main.py` runs the full transaction and the unauthorized attempts.
 
 **Repository:** https://github.com/Queenlinda12/formative2-multimodal-auth
 
@@ -60,6 +60,8 @@ python scripts/image_pipeline.py      # Task 2: image features
 python scripts/face_model.py          #         face model
 python scripts/audio_pipeline.py      # Task 3: audio features
 python scripts/voice_model.py         #         voice model
+python scripts/product_model.py       # Task 4: product model
+python scripts/main.py --demo         # Task 6: full transaction and denied attempts
 ```
 
 Every output (`data/processed/`, `features/`, `models/`, `audio/processed/`, augmented images and clips) is rebuilt from the raw files by these scripts, so deleting an output and re-running brings it back.
@@ -114,6 +116,17 @@ jupyter notebook notebooks/03_audio_processing_voice_model.ipynb   # step-by-ste
 - `audio/raw/unauthorized_*.m4a` (a speaker outside the team, saying both phrases) is the stranger for the demo. It is never used for training.
 - **Limitations:** the main one is the amount of data (2 to 6 recordings per member). Results improved sharply with each real extra take. The phrase check can tell the two approved phrases apart but has never heard a wrong phrase. Background noise (Sheja's room hum, for example) can be learned as part of a voice.
 
-## Task 4: Product model and command-line app
+## Task 4 and the command-line app: Product model
 
-To be completed by Member D.
+```bash
+source .venv/bin/activate
+python scripts/product_model.py    # evaluates and saves models/product_model.joblib
+python scripts/main.py --demo      # full transaction, plus face, voice, and mismatch denials
+python scripts/main.py             # prompts for a face image, a voice clip, and a customer id
+```
+
+- Trains a Random Forest on `data/processed/merged_dataset_model_ready.csv`. The inputs are every column except `transaction_id`, `customer_id` and `product_category`. The label is `target_code` (0 Books, 1 Clothing, 2 Electronics, 3 Groceries, 4 Sports).
+- Evaluation is `GroupKFold` grouped by `customer_id`, because one customer has several transactions and the spending features are shared across those rows. The script prints accuracy, macro F1 and log loss, next to a majority-class baseline and a base-rate log loss. Accuracy comes out a little above the majority baseline. Log loss stays near the base-rate loss: the purchase table has a weak pattern, and the forest is more confident than that pattern supports.
+- `predict_product(customer_id=151)` in `scripts/product_model.py` returns the product name. A `transaction_id` scores that visit. A customer's id scores their latest visit.
+- `scripts/main.py` follows the system flow. A recognised face is allowed to call the product model. The recommendation is shown only after the voice check names that same member. An unknown face, an unapproved voice, or a face and a voice that belong to different people ends in access denied, and the product is not shown.
+- The demo uses `images/raw/unauthorized_face.jpg` and `audio/raw/unauthorized_yesapprove.m4a` as the stranger attempts, and Sheja's face with Aime's voice as the mismatch.
